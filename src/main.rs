@@ -1,108 +1,103 @@
 use mio::net::{TcpListener, TcpStream};
-use mio::{Poll, Token, Ready, PollOpt, Events};
+use mio::{Events, Poll, Token, Interest};
+use std::io::{Write, Read};
+use std::error::Error;
+use std::{thread, time};
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::sync::{Mutex, Arc};
+use std::rc::Rc;
+use threadpool::ThreadPool;
+use std::net::SocketAddr;
+use std::cell::RefCell;
+use std::str::from_utf8;
+use std::borrow::Borrow;
 
-static RESPONSE: &str = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: Keep-Alive\r\n\r\nhello";
-
-fn is_double_crnl(window: &[u8]) -> bool {
-    window.len() >= 4 &&
-        (window[0] == '\r' as u8) &&
-        (window[1] == '\n' as u8) &&
-        (window[2] == '\r' as u8) &&
-        (window[3] == '\n' as u8)
-}
+const NUM_THREADS: usize = 4;
+const SERVER: Token = Token(0);
+const REQUEST_BUFFER_SIZE: usize = 8192;
+const DEFAULT_RESPONSE: &str = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: Keep-Alive\r\n\r\nhello";
 
 fn main() {
-    let address = "127.0.0.1:13265";
-    let listener = TcpListener::bind(&address.parse().unwrap()).unwrap();
+    println!("{}", "Teeeeesst");
 
+    //let addr = "127.0.0.1:13265".parse().unwrap();
+    let addr: SocketAddr = ([127, 0, 0, 1], 13265).into();
+    println!("{}", "222");
     let mut poll = Poll::new().unwrap();
-    poll.register(
-        &listener,
-        Token(0),
-        Ready::readable(),
-        PollOpt::edge()).unwrap();
+    println!("{}", "3333");
+    let mut server = TcpListener::bind(addr).unwrap();
+    let mut connections: HashMap<usize, TcpStream> = HashMap::new();
 
-    let mut counter: usize = 0;
-    let mut sockets: HashMap<Token, TcpStream> = HashMap::new();
-    let mut requests: HashMap<Token, Vec<u8>> = HashMap::new();
-    let mut buffer = [0 as u8; 1024];
-
-    let mut events = Events::with_capacity(1024);
+    println!("{}", "111");
+    poll.registry().register(&mut server, SERVER, Interest::READABLE).unwrap();
+    //poll.register(&mut server, SERVER, Ready::readable(), PollOpt::edge()).unwrap();
+    println!("{}", "Server created");
+    let mut events = Events::with_capacity(128);
+    let mut buffer: [u8; REQUEST_BUFFER_SIZE] = [0; REQUEST_BUFFER_SIZE];
     loop {
+        //events.clear();
         poll.poll(&mut events, None).unwrap();
-        for event in &events {
+        // println!("{}", "Events polled");
+        for event in events.iter() {
             match event.token() {
-                Token(0) => {
+                SERVER => {
+                    //println!("{}", "Process -> Server...");
                     loop {
-                        match listener.accept() {
-                            Ok((socket, _)) => {
-                                counter += 1;
-                                let token = Token(counter);
-
-                                poll.register(
-                                    &socket,
-                                    token,
-                                    Ready::readable(),
-                                    PollOpt::edge()).unwrap();
-
-                                sockets.insert(token, socket);
-                                requests.insert(token, Vec::with_capacity(192));
-                            },
-                            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock =>
-                                break,
-                            Err(_) => break
+                        match server.accept() {
+                            Ok((mut stream, address)) => {
+                                stream.set_nodelay(true).unwrap();
+                                let token_id = address.port() as usize;
+                                let token = Token(token_id);
+                                poll.registry().register(&mut stream, token, Interest::READABLE).unwrap();
+                                //let stream = Rc::new(RefCell::new(stream));
+                                connections.insert(token_id, stream);
+                                println!("new");
+                            }
+                            Err(E) => {
+                                println!("Error Server {}", E);
+                                break;
+                            }
                         }
                     }
-                },
-                token if event.readiness().is_readable() => {
-                    loop {
-                        let read = sockets.get_mut(&token).unwrap().read(&mut buffer);
-                        match read {
-                            Ok(0) => {
-                                sockets.remove(&token);
-                                break
-                            },
-                            Ok(n) => {
-                                let req = requests.get_mut(&token).unwrap();
-                                for b in &buffer[0..n] {
-                                    req.push(*b);
+                    poll.registry().reregister(&mut server, SERVER, Interest::READABLE).unwrap();
+                }
+
+                Token(token_id) => {
+                    if event.is_readable() {
+                        //println!("{}", "Process -> Client...");
+                        let mut local_stream = connections.get_mut(&token_id).unwrap();
+                        let mut need_write:bool = false;
+                        loop {
+                            match local_stream.read(&mut buffer) {
+                                Ok(0) => {
+                                    //println!("recieved empty...");
+                                    //connections.remove(&token_id).unwrap();
+                                    //need_write = false;
+                                    break;
                                 }
-                            },
-                            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock =>
-                                break,
-                            Err(_) => break
+                                Ok(n) => {
+                                    //println!("{}", from_utf8(&buffer).unwrap())
+                                    need_write = true;
+                                }
+                                Err(E) => {
+                                    println!("Error Client {}", E);
+                                    //need_write = false;
+                                    break;
+                                }
+                            }
                         }
+                        if need_write {
+                            local_stream.write(DEFAULT_RESPONSE.as_bytes());
+                            local_stream.flush().unwrap();
+                            poll.registry().reregister(local_stream, event.token(), Interest::READABLE).unwrap();
+                        }
+
                     }
-
-                    let ready = requests.get(&token).unwrap()
-                        .windows(4)
-                        .find(|window| is_double_crnl(*window))
-                        .is_some();
-
-                    if ready {
-                        let socket = sockets.get(&token).unwrap();
-                        poll.reregister(
-                            socket,
-                            token,
-                            Ready::writable(),
-                            PollOpt::edge() | PollOpt::oneshot()).unwrap();
-                    }
-                },
-                token if event.readiness().is_writable() => {
-                    requests.get_mut(&token).unwrap().clear();
-                    sockets.get_mut(&token).unwrap().write_all(RESPONSE.as_bytes()).unwrap();
-
-                    // Re-use existing connection ("keep-alive") - switch back to reading
-                    poll.reregister(
-                        sockets.get(&token).unwrap(),
-                        token,
-                        Ready::readable(),
-                        PollOpt::edge()).unwrap();
-                },
-                _ => unreachable!()
+                }
             }
         }
     }
+
+    return ();
 }
+
