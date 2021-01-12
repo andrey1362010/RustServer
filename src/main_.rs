@@ -52,7 +52,10 @@ fn main() {
                                 connections.insert(token_id, stream.clone());
                                 println!("new");
                             }
-                            _ => {break}
+                            Err(E) => {
+                                println!("Error Server {}", E);
+                                break
+                            }
                         }
                     }
                     poll.registry().reregister(&mut server, SERVER, Interest::READABLE).unwrap();
@@ -79,7 +82,7 @@ fn main() {
 
                         }
                         Err(E) => {
-                            //println!("Error{}", E);
+                            println!("Error Client {}", E);
                             break;
                         }
                     }
