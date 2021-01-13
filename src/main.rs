@@ -83,11 +83,12 @@ fn main() {
         let ready_tx = ready_tx.clone();
         pool.execute(move || {
             loop {
+                println!("Try lock..!");
                 let mut handler = rx.lock().unwrap().recv().unwrap();
                 println!("Process begin..!");
                 let data = handler.read_from_socket();
                 match data {
-                    None => {return}
+                    None => {}
                     Some(DATA) => {
                         handler.write_to_socket(RESPONSE);
                     }
