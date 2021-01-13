@@ -25,8 +25,8 @@ impl Handler {
         }
     }
 
-    fn read_from_socket(&mut self) -> Option<Vec<u8>> {
-        let mut vec = Vec::with_capacity(1024);
+    fn read_from_socket(&mut self) -> Option<u8> {
+        //let mut vec = Vec::with_capacity(1024);
         let mut buffer = [0 as u8; 1024];
         loop {
             let read = self.socket.read(&mut buffer);
@@ -38,19 +38,19 @@ impl Handler {
                 }
                 Ok(n) => {
                     //println!("Read ok");
-                    for i in 0..n {
-                        vec.push(buffer[i]);
-                    }
+                    // for i in 0..n {
+                    //     vec.push(buffer[i]);
+                    // }
                 }
                 _ => {
                     break;
                 }
             }
         }
-        if vec.len() == 0 {
-            return None
-        }
-        Some(vec)
+        // if vec.len() == 0 {
+        //     return None
+        // }
+        Some(1)
     }
 
     fn write_to_socket(&mut self, data: &str) {
@@ -77,15 +77,15 @@ fn main() {
     let (ready_tx, ready_rx): (Sender<Handler>, Receiver<Handler>) = channel();
     let rx = Arc::new(Mutex::new(rx));
 
-    let mut pool = ThreadPool::new(4);
-    for _ in 0..4 {
+    let mut pool = ThreadPool::new(8);
+    for _ in 0..8 {
         let rx = Arc::clone(&rx);
         let ready_tx = ready_tx.clone();
         pool.execute(move || {
             loop {
-                println!("Try lock..!");
+                //println!("Try lock..!");
                 let mut handler = rx.lock().unwrap().recv().unwrap();
-                println!("Process begin..!");
+                //println!("Process begin..!");
                 let data = handler.read_from_socket();
                 match data {
                     None => {}
@@ -93,7 +93,7 @@ fn main() {
                         handler.write_to_socket(RESPONSE);
                     }
                 }
-                println!("Process end..!");
+                //println!("Process end..!");
                 ready_tx.send(handler).unwrap();
             }
         });
@@ -102,7 +102,7 @@ fn main() {
 
     let mut events = Events::with_capacity(1024);
     loop {
-        poll.poll(&mut events, Some(Duration::from_millis(20))).unwrap();
+        poll.poll(&mut events, Some(Duration::from_millis(5))).unwrap();
         for event in &events {
             match event.token() {
                 Token(0) => {
@@ -113,7 +113,7 @@ fn main() {
                                 let token = Token(token_id);
                                 poll.registry().register(&mut socket, token, Interest::READABLE).unwrap();
                                 handlers.insert(token, Handler::init(token, socket));
-                                println!("Connection accepted!")
+                                //println!("Connection accepted!")
                             }
                             Err(_) => break
                         }
@@ -122,7 +122,7 @@ fn main() {
                 }
                 token if event.is_readable() => {
                     if let Some(handler) = handlers.remove(&token) {
-                        println!("Connection send to read..!");
+                        //println!("Connection send to read..!");
                         tx.send(handler).unwrap();
                     }
                 }
@@ -134,7 +134,7 @@ fn main() {
             let opt = ready_rx.try_recv();
             match opt {
                 Ok(mut handler) if handler.is_open => {
-                    println!("Recreate register!");
+                    //println!("Recreate register!");
                     poll.registry().reregister(&mut handler.socket, handler.token, Interest::READABLE).unwrap();
                     handlers.insert(handler.token, handler);
                 }
