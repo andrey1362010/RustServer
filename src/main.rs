@@ -1,103 +1,144 @@
 use mio::net::{TcpListener, TcpStream};
-use mio::{Events, Poll, Token, Interest};
-use std::io::{Write, Read};
-use std::error::Error;
-use std::{thread, time};
+use mio::{Poll, Token, Interest, Events};
+use std::time::Duration;
 use std::collections::HashMap;
-use std::sync::{Mutex, Arc};
-use std::rc::Rc;
+use std::sync::mpsc::{channel, Receiver, Sender};
 use threadpool::ThreadPool;
-use std::net::SocketAddr;
-use std::cell::RefCell;
-use std::str::from_utf8;
-use std::borrow::Borrow;
+use std::sync::{Mutex, Arc};
+use std::io::{Read, Write};
 
-const NUM_THREADS: usize = 4;
-const SERVER: Token = Token(0);
-const REQUEST_BUFFER_SIZE: usize = 8192;
-const DEFAULT_RESPONSE: &str = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: Keep-Alive\r\n\r\nhello";
+static RESPONSE: &str = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: Keep-Alive\r\n\r\nhello";
 
-fn main() {
-    println!("{}", "Teeeeesst");
 
-    //let addr = "127.0.0.1:13265".parse().unwrap();
-    let addr: SocketAddr = ([127, 0, 0, 1], 13265).into();
-    println!("{}", "222");
-    let mut poll = Poll::new().unwrap();
-    println!("{}", "3333");
-    let mut server = TcpListener::bind(addr).unwrap();
-    let mut connections: HashMap<usize, TcpStream> = HashMap::new();
+struct Handler {
+    token: Token,
+    socket: TcpStream,
+    is_open: bool,
+}
 
-    println!("{}", "111");
-    poll.registry().register(&mut server, SERVER, Interest::READABLE).unwrap();
-    //poll.register(&mut server, SERVER, Ready::readable(), PollOpt::edge()).unwrap();
-    println!("{}", "Server created");
-    let mut events = Events::with_capacity(128);
-    let mut buffer: [u8; REQUEST_BUFFER_SIZE] = [0; REQUEST_BUFFER_SIZE];
-    loop {
-        //events.clear();
-        poll.poll(&mut events, None).unwrap();
-        // println!("{}", "Events polled");
-        for event in events.iter() {
-            match event.token() {
-                SERVER => {
-                    //println!("{}", "Process -> Server...");
-                    loop {
-                        match server.accept() {
-                            Ok((mut stream, address)) => {
-                                stream.set_nodelay(true).unwrap();
-                                let token_id = address.port() as usize;
-                                let token = Token(token_id);
-                                poll.registry().register(&mut stream, token, Interest::READABLE).unwrap();
-                                //let stream = Rc::new(RefCell::new(stream));
-                                connections.insert(token_id, stream);
-                                println!("new");
-                            }
-                            Err(E) => {
-                                println!("Error Server {}", E);
-                                break;
-                            }
-                        }
-                    }
-                    poll.registry().reregister(&mut server, SERVER, Interest::READABLE).unwrap();
+impl Handler {
+    fn init(token: Token, socket: TcpStream) -> Handler {
+        Handler {
+            token,
+            socket,
+            is_open: true,
+        }
+    }
+
+    fn read_from_socket(&mut self) -> Option<Vec<u8>> {
+        let mut vec = Vec::with_capacity(1024);
+        let mut buffer = [0 as u8; 1024];
+        loop {
+            let read = self.socket.read(&mut buffer);
+            match read {
+                Ok(0) => {
+                    //println!("Read empty");
+                    self.is_open = false;
+                    return None
                 }
-
-                Token(token_id) => {
-                    if event.is_readable() {
-                        //println!("{}", "Process -> Client...");
-                        let mut local_stream = connections.get_mut(&token_id).unwrap();
-                        let mut need_write:bool = false;
-                        loop {
-                            match local_stream.read(&mut buffer) {
-                                Ok(0) => {
-                                    //println!("recieved empty...");
-                                    //connections.remove(&token_id).unwrap();
-                                    //need_write = false;
-                                    break;
-                                }
-                                Ok(n) => {
-                                    //println!("{}", from_utf8(&buffer).unwrap())
-                                    need_write = true;
-                                }
-                                Err(E) => {
-                                    println!("Error Client {}", E);
-                                    //need_write = false;
-                                    break;
-                                }
-                            }
-                        }
-                        if need_write {
-                            local_stream.write(DEFAULT_RESPONSE.as_bytes());
-                            local_stream.flush().unwrap();
-                            poll.registry().reregister(local_stream, event.token(), Interest::READABLE).unwrap();
-                        }
-
+                Ok(n) => {
+                    //println!("Read ok");
+                    for i in 0..n {
+                        vec.push(buffer[i]);
                     }
                 }
+                _ => {
+                    break;
+                }
+            }
+        }
+        if vec.len() == 0 {
+            return None
+        }
+        Some(vec)
+    }
+
+    fn write_to_socket(&mut self, data: &str) {
+        match self.socket.write_all(data.as_bytes()) {
+            Ok(_) => (),
+            Err(_) => {
+                self.is_open = false;
+                return;
             }
         }
     }
 
-    return ();
 }
 
+fn main() {
+    let address = "127.0.0.1:13265";
+    let mut listener = TcpListener::bind(address.parse().unwrap()).unwrap();
+
+    let mut poll = Poll::new().unwrap();
+    poll.registry().register(&mut listener, Token(0), Interest::READABLE).unwrap();
+
+    let mut handlers: HashMap<Token, Handler> = HashMap::new();
+    let (tx, rx): (Sender<Handler>, Receiver<Handler>) = channel();
+    let (ready_tx, ready_rx): (Sender<Handler>, Receiver<Handler>) = channel();
+    let rx = Arc::new(Mutex::new(rx));
+
+    let mut pool = ThreadPool::new(4);
+    for _ in 0..4 {
+        let rx = Arc::clone(&rx);
+        let ready_tx = ready_tx.clone();
+        pool.execute(move || {
+            loop {
+                let mut handler = rx.lock().unwrap().recv().unwrap();
+                println!("Process begin..!");
+                let data = handler.read_from_socket();
+                match data {
+                    None => {return}
+                    Some(DATA) => {
+                        handler.write_to_socket(RESPONSE);
+                    }
+                }
+                println!("Process end..!");
+                ready_tx.send(handler).unwrap();
+            }
+        });
+    }
+
+
+    let mut events = Events::with_capacity(1024);
+    loop {
+        poll.poll(&mut events, Some(Duration::from_millis(20))).unwrap();
+        for event in &events {
+            match event.token() {
+                Token(0) => {
+                    loop {
+                        match listener.accept() {
+                            Ok((mut socket, address)) => {
+                                let token_id = address.port() as usize;
+                                let token = Token(token_id);
+                                poll.registry().register(&mut socket, token, Interest::READABLE).unwrap();
+                                handlers.insert(token, Handler::init(token, socket));
+                                println!("Connection accepted!")
+                            }
+                            Err(_) => break
+                        }
+                    }
+                    poll.registry().reregister(&mut listener, Token(0), Interest::READABLE).unwrap();
+                }
+                token if event.is_readable() => {
+                    if let Some(handler) = handlers.remove(&token) {
+                        println!("Connection send to read..!");
+                        tx.send(handler).unwrap();
+                    }
+                }
+                _ => unreachable!()
+            }
+        }
+
+        loop {
+            let opt = ready_rx.try_recv();
+            match opt {
+                Ok(mut handler) if handler.is_open => {
+                    println!("Recreate register!");
+                    poll.registry().reregister(&mut handler.socket, handler.token, Interest::READABLE).unwrap();
+                    handlers.insert(handler.token, handler);
+                }
+                _ => break,
+            }
+        }
+    }
+}
